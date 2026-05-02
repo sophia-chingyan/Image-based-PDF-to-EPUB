@@ -34,7 +34,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SECRET_KEY    = os.environ["SECRET_KEY"]
 ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"].strip().lower()
 
-# Support both APP_BASE_URL (your Zeabur variable name) and BASE_URL
+# Public domain of the deployed app
 BASE_URL = os.environ.get("APP_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8000")
 BASE_URL = BASE_URL.rstrip("/")
 
