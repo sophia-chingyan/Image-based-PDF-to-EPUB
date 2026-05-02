@@ -55,7 +55,7 @@ def pacific_today_key() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the background worker thread on application startup."""
-    from Worker import main as worker_main
+    from Worker.worker import main as worker_main
     t = threading.Thread(target=worker_main, daemon=True, name="pdf-worker")
     t.start()
     yield
