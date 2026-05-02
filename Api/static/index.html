@@ -69,24 +69,6 @@
     }
     .logout-btn:hover { color: var(--red); border-color: var(--red); }
 
-    /* ── Quota indicator ── */
-    .quota-bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 0.6rem 0.9rem;
-      background: var(--cream);
-      border: 1px solid var(--border);
-      margin-bottom: 2rem;
-      font-family: 'DM Mono', monospace;
-      font-size: 0.72rem;
-      color: var(--muted);
-    }
-    .quota-label { letter-spacing: 0.06em; }
-    .quota-value { color: var(--ink); }
-    .quota-value.warn { color: var(--amber); }
-    .quota-value.danger { color: var(--red); }
-
     .upload-section { margin-bottom: 2.5rem; }
 
     .section-label {
@@ -254,7 +236,6 @@
       letter-spacing: 0.05em;
     }
 
-    /* ── Toast ── */
     .toast {
       position: fixed; bottom: 2rem; right: 2rem;
       background: var(--ink); color: var(--paper);
@@ -266,67 +247,6 @@
       z-index: 200; pointer-events: none;
     }
     .toast.show { opacity: 1; transform: translateY(0); }
-
-    /* ── Modal ── */
-    .modal-overlay {
-      position: fixed; inset: 0;
-      background: rgba(26, 22, 20, 0.6);
-      display: none;
-      align-items: center; justify-content: center;
-      z-index: 150;
-      padding: 1.5rem;
-    }
-    .modal-overlay.show { display: flex; }
-    .modal {
-      background: var(--cream);
-      border: 1px solid var(--border);
-      max-width: 460px; width: 100%;
-      padding: 2rem;
-      box-shadow: 4px 4px 0 var(--border);
-      position: relative;
-    }
-    .modal::before, .modal::after {
-      content: ''; position: absolute;
-      width: 14px; height: 14px;
-      border-color: var(--amber); border-style: solid;
-    }
-    .modal::before { top: 8px; left: 8px; border-width: 2px 0 0 2px; }
-    .modal::after  { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
-
-    .modal-title {
-      font-size: 1.1rem; font-weight: 800;
-      color: var(--amber);
-      margin-bottom: 1rem; letter-spacing: 0.02em;
-    }
-    .modal-body {
-      font-size: 0.9rem; line-height: 1.7;
-      margin-bottom: 1.5rem; color: var(--ink);
-    }
-    .modal-stats {
-      font-family: 'DM Mono', monospace;
-      font-size: 0.75rem;
-      background: rgba(192, 112, 0, 0.08);
-      border-left: 3px solid var(--amber);
-      padding: 0.7rem 0.9rem;
-      margin: 1rem 0;
-    }
-    .modal-stats div { margin: 0.2rem 0; }
-    .modal-actions {
-      display: flex; gap: 0.5rem; justify-content: flex-end;
-    }
-    .modal-btn {
-      padding: 0.6rem 1.2rem;
-      font-family: 'DM Mono', monospace;
-      font-size: 0.78rem;
-      letter-spacing: 0.06em;
-      border: none; cursor: pointer;
-      transition: background 0.15s, transform 0.1s;
-    }
-    .modal-btn:hover { transform: translate(-1px, -1px); }
-    .modal-cancel { background: var(--border); color: var(--ink); }
-    .modal-cancel:hover { background: #b8aa97; }
-    .modal-proceed { background: var(--amber); color: #fff; }
-    .modal-proceed:hover { background: #8a5000; }
   </style>
 </head>
 <body>
@@ -341,12 +261,6 @@
     </div>
     <a href="/auth/logout" class="logout-btn">Sign out ↗</a>
   </header>
-
-  <!-- Quota indicator -->
-  <div class="quota-bar" id="quota-bar">
-    <span class="quota-label">Gemini quota today</span>
-    <span><span class="quota-value" id="quota-used">—</span> / <span id="quota-limit">—</span> requests</span>
-  </div>
 
   <!-- Upload -->
   <div class="upload-section">
@@ -384,30 +298,12 @@
   </div>
 </div>
 
-<!-- Page-count warning modal -->
-<div class="modal-overlay" id="warn-modal">
-  <div class="modal">
-    <div class="modal-title">⚠ Quota notice</div>
-    <div class="modal-body" id="warn-modal-body">
-      This PDF requires more Gemini API calls than you have remaining today.
-    </div>
-    <div class="modal-stats" id="warn-modal-stats"></div>
-    <div class="modal-actions">
-      <button class="modal-btn modal-cancel" id="warn-cancel">Cancel</button>
-      <button class="modal-btn modal-proceed" id="warn-proceed">Start anyway</button>
-    </div>
-  </div>
-</div>
-
 <div class="toast" id="toast"></div>
 
 <script>
-  // ── State ──────────────────────────────────────────────────────────────────
   let currentJobId = null;
   let pollInterval = null;
-  let pendingStartJobId = null;
 
-  // ── Elements ───────────────────────────────────────────────────────────────
   const dropZone       = document.getElementById('drop-zone');
   const fileInput      = document.getElementById('file-input');
   const progressPanel  = document.getElementById('progress-panel');
@@ -418,13 +314,7 @@
   const progressActs   = document.getElementById('progress-actions');
   const historyContent = document.getElementById('history-content');
   const toast          = document.getElementById('toast');
-  const quotaUsed      = document.getElementById('quota-used');
-  const quotaLimit     = document.getElementById('quota-limit');
-  const warnModal      = document.getElementById('warn-modal');
-  const warnModalBody  = document.getElementById('warn-modal-body');
-  const warnModalStats = document.getElementById('warn-modal-stats');
 
-  // ── Utils ──────────────────────────────────────────────────────────────────
   function showToast(msg, duration = 3000) {
     toast.textContent = msg;
     toast.classList.add('show');
@@ -440,22 +330,6 @@
     const d = new Date(ts * 1000);
     return d.toLocaleDateString() + ' ' +
            d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  // ── Quota ──────────────────────────────────────────────────────────────────
-  async function fetchQuota() {
-    try {
-      const res = await fetch('/api/quota');
-      if (!res.ok) return null;
-      const q = await res.json();
-      quotaUsed.textContent  = q.used_today;
-      quotaLimit.textContent = q.rpd_limit;
-      const ratio = q.used_today / q.rpd_limit;
-      quotaUsed.classList.remove('warn', 'danger');
-      if (ratio >= 0.9) quotaUsed.classList.add('danger');
-      else if (ratio >= 0.6) quotaUsed.classList.add('warn');
-      return q;
-    } catch (_) { return null; }
   }
 
   // ── Drag & drop ────────────────────────────────────────────────────────────
@@ -513,7 +387,6 @@
       progressPct.textContent = '0%';
       renderPendingActions(currentJobId);
       loadHistory();
-      fetchQuota();
     } catch (e) {
       progressBar.classList.remove('indeterminate');
       progressMsg.textContent = 'Upload failed.';
@@ -522,7 +395,6 @@
     }
   }
 
-  // ── Pending / stopped action buttons ──────────────────────────────────────
   function renderPendingActions(jobId) {
     const id = escHtml(jobId);
     progressActs.innerHTML = `
@@ -540,45 +412,8 @@
       </div>`;
   }
 
-  // ── Start / quota check ────────────────────────────────────────────────────
+  // ── Start / Stop / Delete ──────────────────────────────────────────────────
   async function startJob(jobId) {
-    // Pre-flight: check page count vs remaining quota
-    let pageCount = 0;
-    try {
-      const r = await fetch(`/api/status/${jobId}`);
-      if (r.ok) {
-        const j = await r.json();
-        pageCount = j.page_count || 0;
-      }
-    } catch (_) {}
-
-    const q = await fetchQuota();
-
-    if (q && pageCount > 0) {
-      const remaining = q.remaining;
-      if (pageCount > remaining) {
-        // Show warning modal — wait for user choice
-        pendingStartJobId = jobId;
-        warnModalBody.innerHTML =
-          `This PDF will need approximately <strong>${pageCount}</strong> ` +
-          `Gemini API calls (1 per page), but you only have ` +
-          `<strong>${remaining}</strong> remaining today.<br><br>` +
-          `If you start anyway, the job will pause when the daily quota is ` +
-          `reached and resume after midnight Pacific Time. ` +
-          `Or you can cancel and try a smaller PDF first.`;
-        warnModalStats.innerHTML =
-          `<div>PDF pages: ${pageCount}</div>` +
-          `<div>Quota used today: ${q.used_today} / ${q.rpd_limit}</div>` +
-          `<div>Remaining: ${remaining}</div>`;
-        warnModal.classList.add('show');
-        return;
-      }
-    }
-
-    actuallyStartJob(jobId);
-  }
-
-  async function actuallyStartJob(jobId) {
     try {
       const res = await fetch(`/api/start/${jobId}`, { method: 'POST' });
       if (!res.ok) {
@@ -597,17 +432,6 @@
       showToast('Start failed: ' + e.message);
     }
   }
-
-  document.getElementById('warn-cancel').addEventListener('click', () => {
-    warnModal.classList.remove('show');
-    pendingStartJobId = null;
-  });
-  document.getElementById('warn-proceed').addEventListener('click', () => {
-    const jid = pendingStartJobId;
-    warnModal.classList.remove('show');
-    pendingStartJobId = null;
-    if (jid) actuallyStartJob(jid);
-  });
 
   async function stopJob(jobId) {
     try {
@@ -655,7 +479,6 @@
       if (!res.ok) return;
       const job = await res.json();
       updateProgressUI(job);
-      fetchQuota();
       if (['done', 'failed', 'stopped'].includes(job.status)) {
         clearInterval(pollInterval);
         pollInterval = null;
@@ -712,7 +535,7 @@
         progressFn.textContent = j.filename || '';
       }
     } catch (_) {}
-    progressMsg.textContent = 'Checking quota…';
+    progressMsg.textContent = 'Starting…';
     progressPct.textContent = '0%';
     progressBar.style.width = '0%';
     progressActs.innerHTML = '';
@@ -817,8 +640,6 @@
 
   // ── Init ───────────────────────────────────────────────────────────────────
   loadHistory();
-  fetchQuota();
-  setInterval(fetchQuota, 30000);  // refresh quota every 30s
 </script>
 </body>
 </html>
