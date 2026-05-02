@@ -5,7 +5,6 @@ import time
 import aiofiles
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -39,16 +38,6 @@ BASE_URL = os.environ.get("APP_BASE_URL") or os.environ.get("BASE_URL", "http://
 BASE_URL = BASE_URL.rstrip("/")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
-
-# Gemini quota tracking (Pacific Time — matches Google's reset clock)
-RPD_LIMIT      = int(CFG["ocr"].get("rpd_limit", 250))
-RPM_LIMIT      = int(CFG["ocr"].get("rpm_limit", 10))
-PACIFIC_OFFSET = timedelta(hours=-7)
-
-
-def pacific_today_key() -> str:
-    now_pacific = datetime.now(timezone.utc) + PACIFIC_OFFSET
-    return now_pacific.strftime("%Y-%m-%d")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -91,10 +80,9 @@ async def get_redis():
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 async def create_session(request: Request, email: str) -> None:
-    """Create a persistent session token in Redis and set it on the cookie."""
     session_token = str(uuid.uuid4())
     r = await get_redis()
-    await r.set(f"session:{session_token}", email)   # no expiry — persistent until logout
+    await r.set(f"session:{session_token}", email)
     await r.aclose()
     request.session["session_token"] = session_token
 
@@ -184,7 +172,6 @@ async def upload_pdf(
     async with aiofiles.open(pdf_path, "wb") as f:
         await f.write(content)
 
-    # Count pages cheaply (no OCR) so the UI can show a quota warning
     page_count = 0
     try:
         import fitz
@@ -218,26 +205,6 @@ async def upload_pdf(
         "job_id":     job_id,
         "filename":   file.filename,
         "page_count": page_count,
-    })
-
-
-# ── Quota ─────────────────────────────────────────────────────────────────────
-@app.get("/api/quota")
-async def quota(user: str = Depends(require_auth)):
-    """
-    Return today's Gemini API usage so the frontend can show a
-    page-count warning before the user clicks Start.
-    Quota resets at midnight Pacific Time (same as Google's counter).
-    """
-    r = await get_redis()
-    raw = await r.get(f"gemini_usage:{pacific_today_key()}")
-    await r.aclose()
-    used = int(raw) if raw else 0
-    return JSONResponse({
-        "used_today": used,
-        "rpd_limit":  RPD_LIMIT,
-        "rpm_limit":  RPM_LIMIT,
-        "remaining":  max(0, RPD_LIMIT - used),
     })
 
 
