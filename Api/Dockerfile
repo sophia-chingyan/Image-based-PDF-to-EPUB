@@ -11,6 +11,7 @@ COPY Api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.yaml .
+COPY store.py .
 COPY Api/ .
 
 EXPOSE 8000
