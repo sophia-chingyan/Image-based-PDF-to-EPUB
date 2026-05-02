@@ -1,6 +1,6 @@
 ocr:
   engine: gemini              # gemini (only currently registered engine)
-  model_name: gemini-2.5-flash
+  model_name: "gemini-2.5-flash"
   # Gemini free-tier rate limits for gemini-2.5-flash:
   #   10 requests per minute · 250 requests per day
   rpm_limit: 10
