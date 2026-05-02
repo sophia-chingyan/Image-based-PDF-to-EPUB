@@ -99,6 +99,13 @@ figcaption {
     align-items: center;
     min-height: 80vh;
 }
+
+.empty-page {
+    color: #ccc;
+    font-size: 0.8em;
+    text-align: center;
+    margin-top: 2em;
+}
 """
 
 
@@ -172,6 +179,12 @@ def assemble_epub(
 
         body_html = _render_page_html(page, image_items)
 
+        # ── Guard: never write a truly empty body ────────────────────────────
+        # ebooklib raises "Document is empty" if every chapter has no content.
+        # Insert a non-breaking placeholder so the EPUB is always valid.
+        if not body_html.strip():
+            body_html = f'<p class="empty-page">[ page {page.page_number + 1} ]</p>'
+
         chapter = epub.EpubHtml(
             title=f"Page {page.page_number + 1}",
             file_name=f"chapters/{chapter_id}.xhtml",
@@ -192,6 +205,26 @@ def assemble_epub(
         chapters.append(chapter)
         spine.append(chapter)
 
+    # ── Guard: if no pages at all, add a single placeholder chapter ──────────
+    if not chapters:
+        logger.warning("No pages in document structure — inserting placeholder chapter.")
+        placeholder = epub.EpubHtml(
+            title="Document",
+            file_name="chapters/placeholder.xhtml",
+            lang="zh",
+            content="""<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Document</title>
+<link rel="stylesheet" type="text/css" href="../style/horizontal.css"/>
+</head>
+<body><p class="empty-page">[ No text content could be extracted from this PDF ]</p></body>
+</html>""",
+        )
+        book.add_item(placeholder)
+        chapters.append(placeholder)
+        spine.append(placeholder)
+
     # ── Table of Contents ────────────────────────────────────────────────────
     toc_items = []
     for level, title, page_num in structure.toc:
@@ -205,7 +238,7 @@ def assemble_epub(
             )
 
     book.toc = toc_items if toc_items else (
-        [epub.Link(href=chapters[0].file_name, title=structure.title, uid="toc_0")]
+        [epub.Link(href=chapters[0].file_name, title=structure.title or "Document", uid="toc_0")]
         if chapters else []
     )
 
@@ -235,6 +268,9 @@ def _render_page_html(
                     f'<figure><img src="{src}" alt="{html_module.escape(img.alt_text)}"/></figure>'
                 )
         parts.append("</div>")
+        # If no images were actually added, return empty so the caller inserts placeholder
+        if len(parts) == 2:  # only the open/close div tags
+            return ""
         return "\n".join(parts)
 
     img_inserted = set()
