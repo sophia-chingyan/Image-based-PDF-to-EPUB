@@ -33,8 +33,13 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SECRET_KEY    = os.environ["SECRET_KEY"]
 ALLOWED_EMAIL = os.environ["ALLOWED_EMAIL"].strip().lower()
 
-BASE_URL = os.environ.get("APP_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8000")
+BASE_URL = os.environ.get("APP_BASE_URL") or os.environ.get("BASE_URL", "http://localhost:8080")
 BASE_URL = BASE_URL.rstrip("/")
+
+# FIX: Only set Secure cookie flag when serving over HTTPS.
+# With https_only=True on localhost (HTTP), the browser refuses to send
+# the session cookie back, breaking authentication entirely.
+_HTTPS_ONLY = BASE_URL.startswith("https://")
 
 JOB_HISTORY = CFG["server"]["job_history_limit"]
 
@@ -47,7 +52,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="PDF→EPUB Converter", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=True)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=_HTTPS_ONLY)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[BASE_URL], allow_credentials=True,
