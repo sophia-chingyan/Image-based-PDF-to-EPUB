@@ -41,16 +41,17 @@ The entire application runs as **one container, one process**. The FastAPI API a
 │  │  /auth/logout            │  │                              │ │
 │  │  /api/upload             │  │  Pipeline:                   │ │
 │  │  /api/start/{id}         │  │  1. Ingest PDF               │ │
-│  │  /api/stop/{id}          │  │  2. Rasterize pages          │ │
-│  │  /api/delete/{id}        │  │  3. Gemini OCR (1 call/page) │ │
-│  │  /api/status/{id}        │  │  4. Structure analysis       │ │
-│  │  /api/history            │  │  5. Assemble outputs         │ │
-│  │  /api/download/{id}      │  │     - EPUB                   │ │
-│  │  /api/download/{id}/     │  │     - Searchable PDF         │ │
-│  │    textlayer             │  │     - Clean PDF              │ │
-│  │  /api/download/{id}/     │  │                              │ │
-│  │    clean                 │  │  Reads/writes job state      │ │
-│  │  /health                 │  │  via get_sync_redis()        │ │
+│  │  /api/pause/{id}         │  │  2. Rasterize pages          │ │
+│  │  /api/stop/{id}          │  │  3. Gemini OCR (1 call/page) │ │
+│  │  /api/delete/{id}        │  │  4. Structure analysis       │ │
+│  │  /api/status/{id}        │  │  5. Assemble outputs         │ │
+│  │  /api/history            │  │     - EPUB                   │ │
+│  │  /api/download/{id}      │  │     - Searchable PDF         │ │
+│  │  /api/download/{id}/     │  │     - Clean PDF              │ │
+│  │    textlayer             │  │                              │ │
+│  │  /api/download/{id}/     │  │  Reads/writes job state      │ │
+│  │    clean                 │  │  via get_sync_redis()        │ │
+│  │  /health                 │  │                              │ │
 │  └─────────────┬────────────┘  └──────────────┬───────────────┘ │
 │                │                              │                  │
 │                └──────────┬───────────────────┘                  │
@@ -77,7 +78,7 @@ The entire application runs as **one container, one process**. The FastAPI API a
          ↕ API calls (1 per page)
 ┌─────────────────────────────────────────────────────────────────┐
 │               Google Gemini API                                 │
-│         (gemini-2.5-flash — OCR + layout JSON)                  │
+│         (gemini-2.5-flash-lite — OCR + layout JSON)             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -107,7 +108,7 @@ Real Redis via redis-py (sync) and redis.asyncio (async)
 | `job_history` | List of recent job IDs (capped at `job_history_limit`) |
 | `job_queue` | Queue of job IDs awaiting processing (BRPOP) |
 | `session:{token}` | Email address for authenticated session |
-| `gemini_usage:{YYYY-MM-DD}` | Daily Gemini API call count (Pacific Time) |
+| `ocr:{job_id}:{page}` | Per-page OCR result (JSON), for pause/resume |
 
 ---
 
@@ -174,7 +175,7 @@ The user selects one or more output formats before starting a conversion. All se
 | Searchable PDF | `textlayer` | `{job_id}_searchable.pdf` | Original PDF pages with invisible OCR text overlaid — visually identical, fully searchable |
 | Clean PDF | `clean` | `{job_id}_clean.pdf` | OCR text re-typeset into a fresh PDF using ReportLab with proper CJK typography |
 
-**Format selection UI:** Checkboxes shown below the drop zone. Default: EPUB + Searchable PDF checked. Clean PDF unchecked (optional).
+**Format selection UI:** Checkboxes shown in the progress panel after upload. Default: EPUB unchecked, Searchable PDF checked, Clean PDF unchecked.
 
 **Format field in API:** `POST /api/upload` accepts `output_formats` as a comma-separated form field (e.g. `epub,textlayer`). The API validates against `{"epub", "textlayer", "clean"}` and falls back to `["epub"]` if empty.
 
@@ -187,7 +188,7 @@ The user selects one or more output formats before starting a conversion. All se
 
 ### 7. OCR Engine: Google Gemini
 
-**Model:** `gemini-2.5-flash` (configurable via `config.yaml`)
+**Model:** `gemini-2.5-flash-lite` (configurable via `config.yaml`)
 
 **Strategy:** One API call per PDF page. The call returns OCR text, layout classification, and text direction in a single structured JSON response — no separate layout analysis pass needed.
 
@@ -211,14 +212,14 @@ The user selects one or more output formats before starting a conversion. All se
 
 **Retry logic:** Up to `max_retries` attempts with exponential backoff. HTTP 429/503 → back off; other API errors → raise immediately.
 
-**Image preparation:** Pages rasterized at `dpi` (default 300), then downscaled to max 2048px on the longest side before sending to Gemini to control token usage.
+**Image preparation:** Pages rasterized at `dpi` (default 400), then downscaled to max 2048px on the longest side before sending to Gemini to control token usage.
 
-**Free tier limits for `gemini-2.5-flash`:**
-- 10 requests per minute (RPM)
-- 250 requests per day (RPD)
+**Free tier limits for `gemini-2.5-flash-lite`:**
+- 15 requests per minute (RPM)
+- 1,000 requests per day (RPD)
 - Quota resets at midnight Pacific Time
 
-**Daily quota tracking:** The Worker increments `gemini_usage:{YYYY-MM-DD}` in the store (Pacific Time key). If the count reaches `rpd_limit`, the job stops with a `failed` status and a clear message. The user can retry after midnight.
+**Daily quota tracking:** Per-page OCR results are cached in Redis under `ocr:{job_id}:{page}`. On resume, cached pages are replayed without spending API quota.
 
 ---
 
@@ -240,7 +241,7 @@ The user selects one or more output formats before starting a conversion. All se
 - Convert page image to JPEG (downsized to ≤2048px max side, quality 85)
 - Send to Gemini with structured OCR prompt
 - Receive: direction, text blocks with type classifications and bboxes
-- Cache result for steps 4–5
+- Cache result in Redis for pause/resume; also cache in-memory for steps 4–5
 
 **Step 4 — Structure Analysis (`structure_analysis.py`)**
 - Map Gemini layout types to internal `LayoutType` classifications
@@ -290,17 +291,18 @@ Upload (PDF saved, page count read, job record created)
       ▼
   [pending] ── user clicks Start ──► [queued] ── Worker picks up ──► [processing]
       │                                  │                                 │
-      │                                  │ user stops                      │ user stops
+      │                                  │ user stops/pauses               │ user stops/pauses
       ▼                                  ▼                                 ▼
-  [stopped]                          [stopped]                        [stopped]*
-                                                             (stop_requested flag,
-                                                              checked per page)
+  [stopped]                     [stopped/paused]                  [stopped/paused]*
+                                                             (flag checked per page;
+                                                              OCR cache preserved)
                                                                          │
                                             ┌────────────────────────────┤
                                             │                            │
                                             ▼                            ▼
                                          [done]                       [failed]
-                                   (download available)        (retry available)
+                                   (download available)        (retry available;
+                                                               OCR cache preserved)
 ```
 
 **Job record fields:**
@@ -309,16 +311,17 @@ Upload (PDF saved, page count read, job record created)
 |---|---|
 | `job_id` | UUID4 |
 | `filename` | Original uploaded filename |
-| `status` | `pending` / `queued` / `processing` / `done` / `failed` / `stopped` |
+| `status` | `pending` / `queued` / `processing` / `done` / `failed` / `stopped` / `paused` |
 | `progress` | 0–100 integer |
 | `message` | Human-readable status message |
 | `created_at` | Unix timestamp |
 | `pdf_path` | Path to uploaded PDF |
-| `epub_path` | Path to EPUB output (if requested) |
-| `textlayer_path` | Path to searchable PDF output (if requested) |
-| `clean_pdf_path` | Path to clean PDF output (if requested) |
-| `error` | Error message if `status == failed` |
+| `epub_path` | Path to EPUB output (if requested and succeeded) |
+| `textlayer_path` | Path to searchable PDF output (if requested and succeeded) |
+| `clean_pdf_path` | Path to clean PDF output (if requested and succeeded) |
+| `error` | Error message if `status == failed` (or partial failure details) |
 | `stop_requested` | Boolean flag — checked by Worker per page |
+| `pause_requested` | Boolean flag — checked by Worker per page |
 | `page_count` | Total PDF pages (set on upload) |
 | `output_formats` | List of selected formats e.g. `["epub", "textlayer"]` |
 
@@ -326,23 +329,25 @@ Upload (PDF saved, page count read, job record created)
 
 ### 10. Frontend
 
-**Two frontend variants exist in the codebase:**
+**Single production UI served from `Api/static/`:**
 
-| File | Used by | Features |
-|---|---|---|
-| `Api/static/index.html` | Production (served by API) | Format checkboxes, multi-download buttons, no quota bar |
-| `Frontend/Static/index.html` | Reference / future | Quota indicator bar, quota warning modal, no format picker |
+| File | Description |
+|---|---|
+| `Api/static/index.html` | Main app — format checkboxes, progress, multi-download, history |
+| `Api/static/login.html` | Login page — Google OAuth button only |
 
-**Current production UI (`Api/static/index.html`) features:**
+**UI features:**
 - Drag-and-drop or file picker (max 100 MB, PDF only)
-- Output format checkboxes: EPUB ✓, Searchable PDF ✓, Clean PDF ☐
+- Output format checkboxes: EPUB, Searchable PDF ✓, Clean PDF
 - Upload → receive Job ID → show Start / Delete buttons
+- Format picker shown after upload, hidden once job starts
 - Click **Start** → job queued → progress bar with 5-second polling
 - Progress message: `OCR page X / Y…` then `Assembling EPUB…` etc.
+- Pause / Resume support with progress preserved
 - Per-format download buttons when done: `↓ EPUB`, `↓ Searchable PDF`, `↓ Clean PDF`
 - Stop button during processing
 - Retry + Delete on failure
-- Job history table: filename, pages, status, created date, actions
+- Job history cards: filename, pages, status, created date, format tags, actions
 - Sign out link
 
 ---
@@ -358,7 +363,8 @@ Upload (PDF saved, page count read, job record created)
 | `POST` | `/api/upload` | ✓ | Upload PDF, select formats, create job |
 | `GET` | `/api/status/{id}` | ✓ | Get job status and progress |
 | `GET` | `/api/history` | ✓ | Get last N jobs |
-| `POST` | `/api/start/{id}` | ✓ | Queue a pending/stopped/failed job |
+| `POST` | `/api/start/{id}` | ✓ | Queue a pending/stopped/failed/paused job |
+| `POST` | `/api/pause/{id}` | ✓ | Request pause of queued/processing job |
 | `POST` | `/api/stop/{id}` | ✓ | Request stop of queued/processing job |
 | `DELETE` | `/api/delete/{id}` | ✓ | Delete job record and associated files |
 | `GET` | `/api/download/{id}` | ✓ | Download EPUB |
@@ -373,22 +379,23 @@ Upload (PDF saved, page count read, job record created)
 ```yaml
 ocr:
   engine: gemini
-  model_name: "gemini-2.5-flash"   # Gemini model to use
-  rpm_limit: 100                   # Requests per minute (adjust for your tier)
-  max_retries: 3                   # Retry attempts on Gemini API failure
-  request_timeout_s: 120           # Seconds before timeout
-  confidence_threshold: 0.7        # Kept for OCREngine interface compatibility
-  dpi: 300                         # Page rasterization DPI
+  model_name: "gemini-2.5-flash-lite"  # change to gemini-2.5-flash for better accuracy
+  rpm_limit: 15                         # match your Gemini tier
+  rpd_limit: 1000
+  max_retries: 3
+  request_timeout_s: 120
+  confidence_threshold: 0.7             # kept for OCREngine interface compatibility
+  dpi: 400                              # rasterization DPI
 
 pipeline:
   max_pdf_size_mb: 100
-  page_batch_size: 5               # GC hint frequency (pages)
+  page_batch_size: 5
   upload_retention_hours: 24
   output_retention_days: 7
   tmp_cleanup_on_complete: true
 
 epub:
-  default_writing_mode: auto       # auto | horizontal | vertical
+  default_writing_mode: auto            # auto | horizontal | vertical
   embed_page_numbers: true
   chapter_per_page: true
 
@@ -398,8 +405,6 @@ server:
   job_history_limit: 10
 ```
 
-**Note:** `rpd_limit` is not in `config.yaml`. Daily quota (250 RPD for free tier) is a known external constraint — the app tracks usage in the store but does not enforce a hard limit from config in the current `Api/main.py`.
-
 ---
 
 ### 13. Technology Stack
@@ -408,7 +413,7 @@ server:
 |---|---|---|
 | API & Web Server | FastAPI (Python 3.11) | Single process with Worker thread |
 | OAuth2 Client | Authlib | Google OAuth2, dynamic callback URL |
-| OCR Engine | Google Gemini (`gemini-2.5-flash`) | Via `google-genai` SDK |
+| OCR Engine | Google Gemini (`gemini-2.5-flash-lite`) | Via `google-genai` SDK |
 | PDF Processing | PyMuPDF (fitz) | Ingestion, rasterization, text-layer PDF |
 | Image Processing | OpenCV (`opencv-python-headless`) | BGR conversion |
 | EPUB Assembly | EbookLib | EPUB 3, NCX, NAV |
@@ -488,23 +493,15 @@ pdf2epub/
 ├── zbpack.json             # Zeabur build config
 ├── requirements.txt        # Merged API + Worker dependencies
 ├── config.yaml             # All tuneable parameters
-├── store.py                # Redis / fakeredis abstraction (shared)
+├── store.py                # Redis / fakeredis abstraction (shared by API + Worker)
 ├── .env.example            # Template for environment variables
 ├── .dockerignore
 │
 ├── Api/
 │   ├── main.py             # FastAPI app — routes, auth, job control
-│   ├── Api_main.py         # (experimental) version with quota endpoint
-│   ├── Dockerfile          # (legacy, not used for Zeabur deployment)
-│   ├── requirements.txt    # (legacy)
 │   └── static/
-│       ├── index.html      # Production UI: format picker, multi-download
+│       ├── index.html      # Production UI: format picker, multi-download, history cards
 │       └── login.html      # Login: Google OAuth only
-│
-├── Frontend/
-│   └── Static/
-│       ├── index.html      # Reference UI: quota bar + warning modal
-│       └── login.html      # Reference login page
 │
 └── Worker/
     ├── worker.py           # Job queue consumer + pipeline orchestrator
@@ -514,9 +511,7 @@ pdf2epub/
     ├── pdf_ingestion.py    # PyMuPDF: images, links, metadata, rasterization
     ├── structure_analysis.py  # OCR blocks → headings/paragraphs/etc.
     ├── epub_assembly.py    # EbookLib: EPUB 3 output
-    ├── pdf_assembly.py     # PyMuPDF + ReportLab: text-layer and clean PDF
-    ├── Dockerfile          # (legacy, not used for Zeabur deployment)
-    └── requirements.txt    # (legacy)
+    └── pdf_assembly.py     # PyMuPDF + ReportLab: text-layer and clean PDF
 ```
 
 ---
