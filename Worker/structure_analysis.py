@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ocr_engine import TextBlock, LayoutBlock, TextDirection, LayoutType
+from ocr_engine import TextBlock, LayoutBlock, TextDirection, LayoutType, BBox
 from pdf_ingestion import PageInfo
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class StructuredElement:
     level: int = 1             # heading level (1–3), ignored for non-headings
     direction: TextDirection = "horizontal"
     href: Optional[str] = None # if this element is a hyperlink
+    bbox: Optional[BBox] = None # position in PDF point space (for text-layer PDF)
 
 
 @dataclass
@@ -103,6 +104,8 @@ def analyse_page(
     # PDF default is 72 DPI; page_info.height is in points (1 pt = 1/72 inch).
     dpi_scale = dpi / 72.0
     page_height_px = page_info.height * dpi_scale
+    # Scale factor to convert OCR pixel coordinates back to PDF point space.
+    pt_scale = 72.0 / dpi
 
     # ── Build elements ───────────────────────────────────────────────────────
     for i, tb in enumerate(text_blocks):
@@ -116,12 +119,21 @@ def analyse_page(
         level = _heading_level(tb.font_size_estimate, median_size)
         href  = link_map.get(i)
 
+        # Convert OCR pixel bbox to PDF point space for text-layer placement
+        bbox_pts = BBox(
+            tb.bbox.x0 * pt_scale,
+            tb.bbox.y0 * pt_scale,
+            tb.bbox.x1 * pt_scale,
+            tb.bbox.y1 * pt_scale,
+        )
+
         page.elements.append(StructuredElement(
             element_type=block_type,
             text=text,
             level=level if block_type == "heading" else 1,
             direction=tb.direction,
             href=href,
+            bbox=bbox_pts,
         ))
 
     # ── Embed images that appear on this page ────────────────────────────────

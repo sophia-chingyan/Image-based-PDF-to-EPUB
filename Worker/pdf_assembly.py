@@ -53,9 +53,18 @@ def assemble_textlayer_pdf(
             if not text:
                 continue
 
-            # Distribute text vertically across the page
-            y_ratio = (idx + 0.5) / max(total, 1)
-            y_pos = page_rect.y0 + y_ratio * page_rect.height
+            # Use OCR bbox (already scaled to PDF point space) when available.
+            # Fall back to even vertical distribution when bbox is absent.
+            if el.bbox is not None:
+                x_pos = page_rect.x0 + el.bbox.x0
+                y_pos = page_rect.y0 + el.bbox.y0
+            else:
+                # Distribute text vertically across the page
+                y_ratio = (idx + 0.5) / max(total, 1)
+                x_pos = page_rect.x0 + 20
+                y_pos = page_rect.y0 + y_ratio * page_rect.height
+
+            x_pos = max(page_rect.x0 + 5, min(x_pos, page_rect.x1 - 10))
             y_pos = max(page_rect.y0 + 10, min(y_pos, page_rect.y1 - 20))
 
             try:
@@ -70,7 +79,7 @@ def assemble_textlayer_pdf(
                     if y_cursor > page_rect.y1 - 10:
                         break
                     try:
-                        tw.append(pos=(page_rect.x0 + 20, y_cursor),
+                        tw.append(pos=(x_pos, y_cursor),
                                   text=line, font=font, fontsize=fontsize)
                     except Exception:
                         pass
@@ -79,7 +88,7 @@ def assemble_textlayer_pdf(
             except Exception:
                 try:
                     page.insert_text(
-                        point=(page_rect.x0 + 20, y_pos),
+                        point=(x_pos, y_pos),
                         text=text[:200], fontsize=1, color=(1, 1, 1))
                 except Exception:
                     pass
