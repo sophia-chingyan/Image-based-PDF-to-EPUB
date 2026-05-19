@@ -244,10 +244,30 @@ def _render_page_html(page: StructuredPage, image_items: dict) -> str:
             return ""
         return "\n".join(parts)
 
+    # FIX: Track which images have been inserted to avoid duplicates.
+    # Previously img_inserted was created but never populated, so images
+    # were always appended again at the bottom of the page.
     img_inserted = set()
+
+    # FIX: Group consecutive list-items into a single <ul> block.
+    # Previously each list-item got its own <ul><li>...</li></ul>,
+    # producing invalid HTML.
+    in_list = False
 
     for el in page.elements:
         text_escaped = html_module.escape(el.text)
+
+        if el.element_type == "list-item":
+            if not in_list:
+                parts.append("<ul>")
+                in_list = True
+            parts.append(f"<li>{text_escaped}</li>")
+            continue
+
+        # Close any open list before emitting a non-list element
+        if in_list:
+            parts.append("</ul>")
+            in_list = False
 
         if el.element_type == "heading":
             tag = f"h{min(el.level, 3)}"
@@ -258,8 +278,6 @@ def _render_page_html(page: StructuredPage, image_items: dict) -> str:
             else:
                 inner = text_escaped
             parts.append(f"<p>{inner}</p>")
-        elif el.element_type == "list-item":
-            parts.append(f"<ul><li>{text_escaped}</li></ul>")
         elif el.element_type == "footnote":
             parts.append(f'<aside class="footnote"><p>{text_escaped}</p></aside>')
         elif el.element_type == "page-number":
@@ -269,9 +287,14 @@ def _render_page_html(page: StructuredPage, image_items: dict) -> str:
         else:
             parts.append(f"<p>{text_escaped}</p>")
 
+    # Close any trailing open list
+    if in_list:
+        parts.append("</ul>")
+
     for img in page.images:
         if img.epub_id not in img_inserted and img.epub_id in image_items:
             src = f"../images/{img.epub_id}.{img.ext}"
             parts.append(f'<figure><img src="{src}" alt=""/></figure>')
+            img_inserted.add(img.epub_id)
 
     return "\n".join(parts)
