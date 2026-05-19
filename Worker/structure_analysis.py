@@ -59,6 +59,7 @@ def analyse_page(
     page_info: PageInfo,
     direction: TextDirection,
     image_id_counter: list,   # mutable counter [int]
+    dpi: int = 400,
 ) -> StructuredPage:
     """
     Combine OCR text blocks, layout classifications, and page metadata
@@ -96,13 +97,22 @@ def analyse_page(
             if link.bbox.overlaps(tb.bbox, threshold=0.2):
                 link_map[i] = link.url
 
+    # FIX: Scale page dimensions from PDF points to pixel space so that
+    # bbox coordinates (in pixels from OCR at `dpi`) can be compared
+    # against page height in the same coordinate system.
+    # PDF default is 72 DPI; page_info.height is in points (1 pt = 1/72 inch).
+    dpi_scale = dpi / 72.0
+    page_height_px = page_info.height * dpi_scale
+
     # ── Build elements ───────────────────────────────────────────────────────
     for i, tb in enumerate(text_blocks):
         text = tb.text.strip()
         if not text:
             continue
 
-        block_type: LayoutType = layout_map.get(i, _infer_type(tb, median_size, page_info))
+        block_type: LayoutType = layout_map.get(
+            i, _infer_type(tb, median_size, page_info, page_height_px)
+        )
         level = _heading_level(tb.font_size_estimate, median_size)
         href  = link_map.get(i)
 
@@ -126,7 +136,12 @@ def analyse_page(
     return page
 
 
-def _infer_type(tb: TextBlock, median_size: float, page_info: PageInfo) -> LayoutType:
+def _infer_type(
+    tb: TextBlock,
+    median_size: float,
+    page_info: PageInfo,
+    page_height_px: float,
+) -> LayoutType:
     """Fallback type inference when layout analysis doesn't cover a block."""
     size = tb.font_size_estimate
 
@@ -134,8 +149,10 @@ def _infer_type(tb: TextBlock, median_size: float, page_info: PageInfo) -> Layou
     text = tb.text.strip()
     if re.fullmatch(r"\d{1,4}", text):
         y_center = (tb.bbox.y0 + tb.bbox.y1) / 2
-        page_h   = page_info.height
-        if y_center < page_h * 0.1 or y_center > page_h * 0.9:
+        # FIX: Compare against page_height_px (pixel space) instead of
+        # page_info.height (PDF points). Both y_center and page_height_px
+        # are now in the same coordinate system.
+        if y_center < page_height_px * 0.1 or y_center > page_height_px * 0.9:
             return "page-number"
 
     # Heading: significantly larger than median
@@ -144,7 +161,7 @@ def _infer_type(tb: TextBlock, median_size: float, page_info: PageInfo) -> Layou
 
     # Footnote: significantly smaller than median, near bottom
     y_center = (tb.bbox.y0 + tb.bbox.y1) / 2
-    if size < median_size * 0.75 and y_center > page_info.height * 0.8:
+    if size < median_size * 0.75 and y_center > page_height_px * 0.8:
         return "footnote"
 
     # List item: starts with bullet or number pattern
