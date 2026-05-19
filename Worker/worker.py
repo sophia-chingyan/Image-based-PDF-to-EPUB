@@ -196,9 +196,12 @@ def run_pipeline(r, job: dict, engine) -> None:
                     _save_ocr_page(r, job_id, page_num, page_result)
 
             page_info = ingested.pages[page_num]
+            # FIX: Pass dpi so analyse_page can scale page dimensions
+            # from PDF points to pixel coordinates for correct heuristics.
             sp = analyse_page(page_number=page_num, text_blocks=text_blocks,
                               layout_blocks=layout_blocks, page_info=page_info,
-                              direction=direction, image_id_counter=image_id_counter)
+                              direction=direction, image_id_counter=image_id_counter,
+                              dpi=DPI)
             structured_pages.append(sp)
             engine.reset_page_cache()
             del page_img
