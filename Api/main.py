@@ -67,16 +67,10 @@ oauth.register(
     client_kwargs={"scope": "openid email profile"},
 )
 
-async def get_redis():
-    return await get_async_redis()
-
 
 # ── OCR cache cleanup helper (async) ─────────────────────────────────────────
 async def _clear_ocr_cache(r, job_id: str) -> int:
-    """
-    Delete all `ocr:{job_id}:*` keys (per-page OCR results saved by the
-    worker for resume support). Returns count deleted. Safe on errors.
-    """
+    """Delete all `ocr:{job_id}:*` keys. Returns count deleted."""
     deleted = 0
     pattern = f"ocr:{job_id}:*"
     try:
@@ -93,7 +87,7 @@ async def _clear_ocr_cache(r, job_id: str) -> int:
 
 async def create_session(request: Request, email: str) -> None:
     session_token = str(uuid.uuid4())
-    r = await get_redis()
+    r = await get_async_redis()
     await r.set(f"session:{session_token}", email)
     await r.aclose()
     request.session["session_token"] = session_token
@@ -102,7 +96,7 @@ async def get_current_user(request: Request) -> Optional[str]:
     token = request.session.get("session_token")
     if not token:
         return None
-    r = await get_redis()
+    r = await get_async_redis()
     email = await r.get(f"session:{token}")
     await r.aclose()
     return email
@@ -136,7 +130,7 @@ async def auth_callback(request: Request):
 async def auth_logout(request: Request):
     token = request.session.pop("session_token", None)
     if token:
-        r = await get_redis()
+        r = await get_async_redis()
         await r.delete(f"session:{token}")
         await r.aclose()
     return RedirectResponse(url="/", status_code=302)
@@ -202,7 +196,7 @@ async def upload_pdf(
         "output_formats":  formats,
     }
 
-    r = await get_redis()
+    r = await get_async_redis()
     await r.set(f"job:{job_id}", json.dumps(job))
     await r.lpush("job_history", job_id)
     await r.ltrim("job_history", 0, JOB_HISTORY - 1)
@@ -216,7 +210,7 @@ async def upload_pdf(
 # ── Status / History ──────────────────────────────────────────────────────────
 @app.get("/api/status/{job_id}")
 async def job_status(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     await r.aclose()
     if not raw:
@@ -225,7 +219,7 @@ async def job_status(job_id: str, user: str = Depends(require_auth)):
 
 @app.get("/api/history")
 async def job_history(user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     ids = await r.lrange("job_history", 0, JOB_HISTORY - 1)
     jobs = []
     for jid in ids:
@@ -238,7 +232,7 @@ async def job_history(user: str = Depends(require_auth)):
 # ── Download: EPUB ────────────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}")
 async def download_epub(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     await r.aclose()
     if not raw:
@@ -255,7 +249,7 @@ async def download_epub(job_id: str, user: str = Depends(require_auth)):
 # ── Download: Text-layer PDF ─────────────────────────────────────────────────
 @app.get("/api/download/{job_id}/textlayer")
 async def download_textlayer(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     await r.aclose()
     if not raw:
@@ -272,7 +266,7 @@ async def download_textlayer(job_id: str, user: str = Depends(require_auth)):
 # ── Download: Clean PDF ──────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}/clean")
 async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     await r.aclose()
     if not raw:
@@ -289,7 +283,7 @@ async def download_clean_pdf(job_id: str, user: str = Depends(require_auth)):
 # ── Start / Pause / Stop / Delete ────────────────────────────────────────────
 @app.post("/api/start/{job_id}")
 async def start_job(job_id: str, request: Request, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
         await r.aclose()
@@ -299,7 +293,6 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         await r.aclose()
         raise HTTPException(400, f"Cannot start from status: {job['status']}.")
 
-    # ── Accept output_formats at start time ──────────────────────────────────
     try:
         body = await request.json()
     except Exception:
@@ -312,15 +305,11 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
         if new_fmts:
             job["output_formats"] = new_fmts
 
-    # Clear stale output paths from any previous run.
-    # NOTE: we deliberately do NOT clear the OCR page cache here — when
-    # a job is being retried after stop/failure, the cached pages are
-    # exactly what lets the resume work without spending API quota again.
     job["epub_path"] = ""
     job["textlayer_path"] = ""
     job["clean_pdf_path"] = ""
 
-    job.update(status="queued", message="Queued", progress=0, error="", 
+    job.update(status="queued", message="Queued", progress=0, error="",
                stop_requested=False, pause_requested=False)
     await r.set(f"job:{job_id}", json.dumps(job))
     await r.lpush("job_queue", job_id)
@@ -333,18 +322,18 @@ async def start_job(job_id: str, request: Request, user: str = Depends(require_a
 
 @app.post("/api/pause/{job_id}")
 async def pause_job(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
         await r.aclose()
         raise HTTPException(404, "Job not found.")
     job = json.loads(raw)
     s = job["status"]
-    
+
     if s in ("done", "failed", "stopped", "paused"):
         await r.aclose()
         raise HTTPException(400, f"Cannot pause from status: {s}.")
-    
+
     if s == "pending":
         job.update(status="paused", message="Paused by user.")
     elif s == "queued":
@@ -352,14 +341,14 @@ async def pause_job(job_id: str, user: str = Depends(require_auth)):
         job.update(status="paused", message="Paused by user.")
     elif s == "processing":
         job.update(pause_requested=True, message="Pausing…")
-    
+
     await r.set(f"job:{job_id}", json.dumps(job))
     await r.aclose()
     return JSONResponse({"job_id": job_id, "status": job["status"]})
 
 @app.post("/api/stop/{job_id}")
 async def stop_job(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
         await r.aclose()
@@ -382,7 +371,7 @@ async def stop_job(job_id: str, user: str = Depends(require_auth)):
 
 @app.delete("/api/delete/{job_id}")
 async def delete_job(job_id: str, user: str = Depends(require_auth)):
-    r = await get_redis()
+    r = await get_async_redis()
     raw = await r.get(f"job:{job_id}")
     if not raw:
         await r.aclose()
@@ -400,7 +389,6 @@ async def delete_job(job_id: str, user: str = Depends(require_auth)):
                 p.unlink(missing_ok=True)
         except OSError:
             pass
-    # Drop any cached per-page OCR results for this job too.
     await _clear_ocr_cache(r, job_id)
     await r.delete(f"job:{job_id}")
     await r.lrem("job_history", 0, job_id)
@@ -409,7 +397,7 @@ async def delete_job(job_id: str, user: str = Depends(require_auth)):
 
 @app.get("/health")
 async def health():
-    r = await get_redis()
+    r = await get_async_redis()
     try:
         await r.ping()
         redis_ok = True
